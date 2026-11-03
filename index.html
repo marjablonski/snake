@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wąż</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --grid: #172033;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --snake: #22c55e;
+    --head: #86efac;
+    --food: #f43f5e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .hud {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    font-size: 18px;
+    font-variant-numeric: tabular-nums;
+  }
+  .hud span b { color: var(--head); }
+  .board { position: relative; }
+  canvas {
+    display: block;
+    background: var(--panel);
+    border-radius: 8px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.4);
+  }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: rgba(15, 23, 42, .78);
+    border-radius: 8px;
+    text-align: center;
+  }
+  .overlay.visible { display: flex; }
+  .overlay h1 { margin: 0; font-size: 32px; }
+  .overlay p { margin: 0; color: var(--muted); }
+  .help { color: var(--muted); font-size: 14px; }
+  kbd {
+    background: var(--panel);
+    border: 1px solid #334155;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: inherit;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hud">
+    <span>Punkty: <b id="score">0</b></span>
+    <span>Poziom: <b id="level">1</b></span>
+    <span>Rekord: <b id="best">0</b></span>
+  </div>
+  <div class="board">
+    <canvas id="canvas" width="400" height="400"></canvas>
+    <div class="overlay" id="overlay">
+      <h1 id="overlay-title">Wąż</h1>
+      <p id="overlay-text"></p>
+      <p id="overlay-hint"></p>
+    </div>
+  </div>
+  <div class="help"><kbd>←</kbd> <kbd>↑</kbd> <kbd>→</kbd> <kbd>↓</kbd> ruch · <kbd>Spacja</kbd> pauza · <kbd>Enter</kbd> start / restart</div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------- Czysta logika gry (bez DOM) ----------
+  var GRID = 20;
+  var BASE_INTERVAL = 150;  // ms na krok na starcie
+  var SPEED_STEP = 15;      // o ile ms szybciej co 5 punktów
+  var MIN_INTERVAL = 50;
+  var POINTS_PER_LEVEL = 5;
+
+  var DIRS = {
+    up:    { x: 0,  y: -1 },
+    down:  { x: 0,  y: 1 },
+    left:  { x: -1, y: 0 },
+    right: { x: 1,  y: 0 }
+  };
+  var OPPOSITE = { up: 'down', down: 'up', left: 'right', right: 'left' };
+
+  function levelFor(score) {
+    return Math.floor(score / POINTS_PER_LEVEL) + 1;
+  }
+
+  function intervalFor(score) {
+    return Math.max(MIN_INTERVAL, BASE_INTERVAL - (levelFor(score) - 1) * SPEED_STEP);
+  }
+
+  function placeFood(snake, rng) {
+    var free = [];
+    for (var y = 0; y < GRID; y++) {
+      for (var x = 0; x < GRID; x++) {
+        var taken = false;
+        for (var i = 0; i < snake.length; i++) {
+          if (snake[i].x === x && snake[i].y === y) { taken = true; break; }
+        }
+        if (!taken) free.push({ x: x, y: y });
+      }
+    }
+    if (free.length === 0) return null;
+    return free[Math.floor(rng() * free.length)];
+  }
+
+  function createState(rng) {
+    rng = rng || Math.random;
+    var mid = Math.floor(GRID / 2);
+    var snake = [
+      { x: mid, y: mid },
+      { x: mid - 1, y: mid },
+      { x: mid - 2, y: mid }
+    ];
+    return {
+      snake: snake,
+      dir: 'right',
+      queue: [],       // kolejka zmian kierunku (max 2), by szybkie wciśnięcia nie gubiły się
+      food: placeFood(snake, rng),
+      score: 0,
+      over: false,
+      won: false
+    };
+  }
+
+  // Zwraca true, jeśli zmiana kierunku została przyjęta.
+  function changeDirection(state, dir) {
+    if (!DIRS[dir] || state.over) return false;
+    var last = state.queue.length ? state.queue[state.queue.length - 1] : state.dir;
+    if (dir === last || dir === OPPOSITE[last]) return false;
+    if (state.queue.length >= 2) return false;
+    state.queue.push(dir);
+    return true;
+  }
+
+  // Jeden krok symulacji. Modyfikuje stan i go zwraca.
+  function step(state, rng) {
+    rng = rng || Math.random;
+    if (state.over) return state;
+    if (state.queue.length) state.dir = state.queue.shift();
+
+    var d = DIRS[state.dir];
+    var head = state.snake[0];
+    var next = { x: head.x + d.x, y: head.y + d.y };
+
+    // Ściana
+    if (next.x < 0 || next.y < 0 || next.x >= GRID || next.y >= GRID) {
+      state.over = true;
+      return state;
+    }
+
+    var eating = state.food && next.x === state.food.x && next.y === state.food.y;
+    // Jeśli nie jemy, ogon się przesunie, więc jego pole będzie wolne.
+    var body = eating ? state.snake : state.snake.slice(0, -1);
+    for (var i = 0; i < body.length; i++) {
+      if (body[i].x === next.x && body[i].y === next.y) {
+        state.over = true;
+        return state;
+      }
+    }
+
+    state.snake.unshift(next);
+    if (eating) {
+      state.score += 1;
+      state.food = placeFood(state.snake, rng);
+      if (!state.food) { state.over = true; state.won = true; }
+    } else {
+      state.snake.pop();
+    }
+    return state;
+  }
+
+  // ---------- Najlepszy wynik (localStorage, z zabezpieczeniem) ----------
+  var BEST_KEY = 'snake.bestScore';
+  function loadBest() {
+    try { return parseInt(localStorage.getItem(BEST_KEY), 10) || 0; } catch (e) { return 0; }
+  }
+  function saveBest(v) {
+    try { localStorage.setItem(BEST_KEY, String(v)); } catch (e) { /* brak dostępu – trudno */ }
+  }
+
+  // Udostępnione do testów
+  window.SnakeLogic = {
+    GRID: GRID, levelFor: levelFor, intervalFor: intervalFor,
+    createState: createState, changeDirection: changeDirection,
+    step: step, placeFood: placeFood
+  };
+
+  // ---------- Warstwa UI ----------
+  var canvas = document.getElementById('canvas');
+  var ctx = canvas.getContext('2d');
+  var CELL = canvas.width / GRID;
+  var scoreEl = document.getElementById('score');
+  var levelEl = document.getElementById('level');
+  var bestEl = document.getElementById('best');
+  var overlay = document.getElementById('overlay');
+  var overlayTitle = document.getElementById('overlay-title');
+  var overlayText = document.getElementById('overlay-text');
+  var overlayHint = document.getElementById('overlay-hint');
+
+  var state = createState();
+  var mode = 'ready'; // ready | running | paused | over
+  var best = loadBest();
+  var timer = null;
+
+  function showOverlay(title, text, hint) {
+    overlayTitle.textContent = title;
+    overlayText.textContent = text;
+    overlayHint.textContent = hint;
+    overlay.classList.add('visible');
+  }
+  function hideOverlay() { overlay.classList.remove('visible'); }
+
+  function updateHud() {
+    scoreEl.textContent = state.score;
+    levelEl.textContent = levelFor(state.score);
+    bestEl.textContent = best;
+  }
+
+  function draw() {
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--panel');
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // delikatna szachownica
+    ctx.fillStyle = '#1a2436';
+    for (var y = 0; y < GRID; y++) {
+      for (var x = (y % 2); x < GRID; x += 2) {
+        ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+      }
+    }
+
+    if (state.food) {
+      ctx.fillStyle = '#f43f5e';
+      ctx.beginPath();
+      ctx.arc(state.food.x * CELL + CELL / 2, state.food.y * CELL + CELL / 2, CELL * 0.38, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    for (var i = state.snake.length - 1; i >= 0; i--) {
+      var s = state.snake[i];
+      ctx.fillStyle = i === 0 ? '#86efac' : '#22c55e';
+      ctx.fillRect(s.x * CELL + 1, s.y * CELL + 1, CELL - 2, CELL - 2);
+    }
+  }
+
+  function scheduleTick() {
+    clearTimeout(timer);
+    timer = setTimeout(tick, intervalFor(state.score));
+  }
+
+  function tick() {
+    if (mode !== 'running') return;
+    step(state);
+    if (state.score > best) { best = state.score; saveBest(best); }
+    updateHud();
+    draw();
+    if (state.over) { endGame(); return; }
+    scheduleTick();
+  }
+
+  function startGame() {
+    state = createState();
+    mode = 'running';
+    hideOverlay();
+    updateHud();
+    draw();
+    scheduleTick();
+  }
+
+  function togglePause() {
+    if (mode === 'running') {
+      mode = 'paused';
+      clearTimeout(timer);
+      showOverlay('Pauza', 'Punkty: ' + state.score, 'Spacja – wznów');
+    } else if (mode === 'paused') {
+      mode = 'running';
+      hideOverlay();
+      scheduleTick();
+    }
+  }
+
+  function endGame() {
+    mode = 'over';
+    clearTimeout(timer);
+    showOverlay(state.won ? 'Wygrana!' : 'Koniec gry',
+                'Wynik: ' + state.score + ' · Rekord: ' + best,
+                'Enter – zagraj ponownie');
+  }
+
+  var KEY_DIRS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+
+  document.addEventListener('keydown', function (e) {
+    if (KEY_DIRS[e.key]) {
+      e.preventDefault();
+      if (mode === 'ready') startGame();
+      if (mode === 'running') changeDirection(state, KEY_DIRS[e.key]);
+    } else if (e.key === ' ' || e.code === 'Space') {
+      e.preventDefault();
+      if (!e.repeat) togglePause();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (mode === 'ready' || mode === 'over') startGame();
+    }
+  });
+
+  // Pauza automatycznie, gdy karta traci fokus
+  window.addEventListener('blur', function () { if (mode === 'running') togglePause(); });
+
+  updateHud();
+  draw();
+  showOverlay('Wąż', 'Zbieraj jedzenie, nie uderzaj w ściany ani w siebie.', 'Enter lub strzałka – start');
+})();
+</script>
+</body>
+</html>
